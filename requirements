@@ -1,0 +1,8 @@
+pip install torch
+pip install openai-whisper
+pip install pyannote.audio
+pip install numpy
+pip install scikit-learn
+pip install ffmpeg-python (sistemden bağımsız ffmpegin kendisininde yüklenmesi gerekli.)
+### 
+pip install torch==2.1.0+cu118 torchvision==0.16.0+cu118 torchaudio==2.1.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
