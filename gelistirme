@@ -1,0 +1,112 @@
+import subprocess
+import torch
+import whisper
+import pyannote.audio
+from sklearn.cluster import AgglomerativeClustering
+from pyannote.audio import Audio
+from pyannote.core import Segment
+import wave
+import contextlib
+import numpy as np
+from datetime import timedelta
+from pyannote.audio.pipelines.speaker_verification import PretrainedSpeakerEmbedding
+
+# Cihaz olarak CPU'yu seç
+device = torch.device("cpu")
+
+# Embedding modelini CPU'da başlat
+embedding_model = PretrainedSpeakerEmbedding(
+    "speechbrain/spkrec-ecapa-voxceleb",
+    device=device
+)
+
+def extract_speakers(model, path, num_speakers=2):
+    """Konuşmacıları çıkar ve isimlendirin"""
+    
+    # Ses dosyasını iki ayrı mono dosyaya ayırın
+    left_channel = 'left_channel.wav'
+    right_channel = 'right_channel.wav'
+    
+    cmd_left = f'ffmpeg -i {path} -filter_complex "pan=mono|c0=FL" -y {left_channel}'
+    cmd_right = f'ffmpeg -i {path} -filter_complex "pan=mono|c0=FR" -y {right_channel}'
+    
+    subprocess.check_output(cmd_left, shell=True)
+    subprocess.check_output(cmd_right, shell=True)
+    
+    # Her bir kanaldan konuşmacı çıkartma
+    channels = [left_channel, right_channel]
+    all_segments = []
+    
+    for idx, channel in enumerate(channels):
+        result = model.transcribe(channel)
+        segments = result["segments"]
+        
+        with contextlib.closing(wave.open(channel, 'r')) as f:
+            frames = f.getnframes()
+            rate = f.getframerate()
+            duration = frames / float(rate)
+        
+        audio = Audio()
+        
+        def segment_embedding(segment):
+            start = segment["start"]
+            end = min(duration, segment["end"])
+            clip = Segment(start, end)
+            waveform, sample_rate = audio.crop(channel, clip)
+            
+            assert waveform.shape[0] == 1, "Waveform mono değil"
+            embeddings = embedding_model(waveform[None])
+            return embeddings.detach().numpy() if isinstance(embeddings, torch.Tensor) else embeddings
+        
+        embeddings = np.zeros(shape=(len(segments), 192))
+        for i, segment in enumerate(segments):
+            embeddings[i] = segment_embedding(segment)
+        
+        embeddings = np.nan_to_num(embeddings)
+        
+        clustering = AgglomerativeClustering(num_speakers).fit(embeddings)
+        labels = clustering.labels_
+        
+        for i in range(len(segments)):
+            segments[i]["speaker"] = f'KONUŞMACI {idx + 1}'  # 1 ya da 2
+        
+        all_segments.extend(segments)  # Her iki kanaldan gelen segmentleri birleştir
+    
+    return all_segments    
+
+def adjust_segments(segments):
+    """Segmentleri kontrol et ve düzeltmeler yapın"""
+    for i in range(1, len(segments)):
+        if segments[i]["start"] < segments[i - 1]["end"]:
+            segments[i]["start"] = segments[i - 1]["end"]  # Çakışmayı düzelt
+    return segments
+
+def write_segments(segments, outfile):
+    """Segmentleri diyalog şeklinde dosyaya yazın"""
+    
+    def time(secs):
+        return timedelta(seconds=round(secs))
+    
+    # Segmentleri zamanlarına göre sırala
+    segments.sort(key=lambda x: x["start"])
+
+    # Dosyayı UTF-8 ile aç
+    with open(outfile, "w", encoding='utf-8') as f:
+        for segment in segments:
+            if "text" in segment:
+                f.write(f"{segment['speaker']} [{time(segment['start'])}]: {segment['text'][1:]}\n")
+
+# Whisper modelini CPU'da yükle
+model = whisper.load_model('large-v3', device=device)
+
+# Dosya yolu
+path = 'C:\\Users\\ahmet\\Desktop\\cagri.kayitlar\\test.wav'
+
+# Konuşmacı çıkarımı yapın
+seg = extract_speakers(model, path)
+
+# Segmentleri ayarlayın
+seg = adjust_segments(seg)
+
+# Segmentleri dosyaya yazın
+write_segments(seg, 'test7.txt')
